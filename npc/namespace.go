@@ -59,7 +59,7 @@ func newNS(name, nodeName string, legacy bool, ipt iptables.Interface, ips ipset
 		rules:       newRuleSet(ipt),
 		legacy:      legacy}
 
-	ns.podSelectors = newSelectorSet(ips, ns.onNewPodSelector)
+	ns.podSelectors = newSelectorSet(ips, ns.onNewPodSelector, ns.onDestroyPodSelector)
 
 	if !legacy {
 		// TODO(mp) check whether it's not possible for a selector's key to be = "default-alow"
@@ -93,9 +93,43 @@ func (ns *ns) onNewPodSelector(selector *selector) error {
 				if err := selector.addEntry(pod.Status.PodIP, podComment(pod)); err != nil {
 					return err
 				}
+				if !ns.legacy && selector.spec.dst {
+					if err := ns.ips.DelEntryIfExists(ns.defaultAllowIPSet, pod.Status.PodIP); err != nil {
+						return err
+					}
+
+				}
 			}
 		}
 	}
+	return nil
+}
+
+func (ns *ns) onDestroyPodSelector(selector *selector) error {
+	if !selector.spec.dst {
+		return nil
+	}
+
+	for _, pod := range ns.pods {
+		if hasIP(pod) {
+			if selector.matches(pod.ObjectMeta.Labels) {
+				// TODO(mp) optimize with refcounting
+				found := false
+				for _, s := range ns.podSelectors.entries {
+					if s.matches(pod.ObjectMeta.Labels) {
+						found = true
+						// TODO(mp) skip
+					}
+				}
+				if !found {
+					if err := ns.ips.AddEntryIfNotExist(ns.defaultAllowIPSet, pod.Status.PodIP, podComment(pod)); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -142,6 +176,13 @@ func (ns *ns) updatePod(oldObj, newObj *coreapi.Pod) error {
 		if ns.checkLocalPod(oldObj) {
 			ns.ips.DelEntry(LocalIpset, oldObj.Status.PodIP)
 		}
+
+		if !ns.legacy {
+			if err := ns.ips.DelEntryIfExists(ns.defaultAllowIPSet, oldObj.Status.PodIP); err != nil {
+				return err
+			}
+		}
+
 		return ns.podSelectors.delFromMatching(oldObj.ObjectMeta.Labels, oldObj.Status.PodIP)
 	}
 
@@ -164,6 +205,7 @@ func (ns *ns) updatePod(oldObj, newObj *coreapi.Pod) error {
 	if !equals(oldObj.ObjectMeta.Labels, newObj.ObjectMeta.Labels) ||
 		oldObj.Status.PodIP != newObj.Status.PodIP {
 
+		// TODO(mp) handle this part
 		for _, ps := range ns.podSelectors.entries {
 			oldMatch := ps.matches(oldObj.ObjectMeta.Labels)
 			newMatch := ps.matches(newObj.ObjectMeta.Labels)

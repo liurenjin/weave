@@ -25,6 +25,10 @@ func newSelectorSpec(json *metav1.LabelSelector, dst bool, nsName string, ipsetT
 		return nil, err
 	}
 	key := selector.String()
+	target := "src"
+	if dst {
+		target = "dst"
+	}
 	return &selectorSpec{
 		key:      key,
 		selector: selector,
@@ -32,7 +36,8 @@ func newSelectorSpec(json *metav1.LabelSelector, dst bool, nsName string, ipsetT
 		// We prefix the selector string with the namespace name when generating
 		// the shortname because you can specify the same selector in multiple
 		// namespaces - we need those to map to distinct ipsets
-		ipsetName: ipset.Name(IpsetNamePrefix + shortName(nsName+":"+key)),
+		// TODO(mp) comment re target
+		ipsetName: ipset.Name(IpsetNamePrefix + shortName(nsName+":"+target+":"+key)),
 		ipsetType: ipsetType,
 		nsName:    nsName}, nil
 }
@@ -57,18 +62,20 @@ func (s *selector) delEntry(entry string) error {
 type selectorFn func(selector *selector) error
 
 type selectorSet struct {
-	ips           ipset.Interface
-	onNewSelector selectorFn
-	users         map[string]map[types.UID]struct{} // list of users per selector
-	entries       map[string]*selector
+	ips               ipset.Interface
+	onNewSelector     selectorFn
+	onDestroySelector selectorFn
+	users             map[string]map[types.UID]struct{} // list of users per selector
+	entries           map[string]*selector
 }
 
-func newSelectorSet(ips ipset.Interface, onNewSelector selectorFn) *selectorSet {
+func newSelectorSet(ips ipset.Interface, onNewSelector selectorFn, onDestroySelector selectorFn) *selectorSet {
 	return &selectorSet{
-		ips:           ips,
-		onNewSelector: onNewSelector,
-		users:         make(map[string]map[types.UID]struct{}),
-		entries:       make(map[string]*selector)}
+		ips:               ips,
+		onNewSelector:     onNewSelector,
+		onDestroySelector: onDestroySelector,
+		users:             make(map[string]map[types.UID]struct{}),
+		entries:           make(map[string]*selector)}
 }
 
 // TODO(mp) document `found`
@@ -107,8 +114,14 @@ func (ss *selectorSet) deprovision(user types.UID, current, desired map[string]*
 				if err := ss.ips.Destroy(spec.ipsetName); err != nil {
 					return err
 				}
+
 				delete(ss.entries, key)
 				delete(ss.users, key)
+
+				selector := &selector{ss.ips, spec}
+				if err := ss.onDestroySelector(selector); err != nil {
+					return err
+				}
 			}
 		}
 	}
