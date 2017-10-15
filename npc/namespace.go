@@ -41,7 +41,8 @@ type ns struct {
 }
 
 func newNS(name, nodeName string, legacy bool, ipt iptables.Interface, ips ipset.Interface, nsSelectors *selectorSet) (*ns, error) {
-	allPods, err := newSelectorSpec(&metav1.LabelSelector{}, true, name, ipset.HashIP)
+	// TODO(mp) dst=true
+	allPods, err := newSelectorSpec(&metav1.LabelSelector{}, false, name, ipset.HashIP)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +72,7 @@ func newNS(name, nodeName string, legacy bool, ipt iptables.Interface, ips ipset
 		ns.defaultAllowIPSet = defaultAllowIPSet
 	}
 
+	// TODO(mp) maybe we can provision only in the case of legacy and then make dst=true
 	if err := ns.podSelectors.provision(ns.uid, nil, map[string]*selectorSpec{ns.allPods.key: ns.allPods}); err != nil {
 		return nil, err
 	}
@@ -94,6 +96,7 @@ func (ns *ns) onNewPodSelector(selector *selector) error {
 					return err
 				}
 				if !ns.legacy && selector.spec.dst {
+					common.Log.Infof(">>>>>>>>>> DelEntry(c): %s", pod.Status.PodIP)
 					if err := ns.ips.DelEntryIfExists(ns.defaultAllowIPSet, pod.Status.PodIP); err != nil {
 						return err
 					}
@@ -155,7 +158,7 @@ func (ns *ns) addPod(obj *coreapi.Pod) error {
 	if err != nil {
 		return err
 	}
-	if !ns.legacy && found {
+	if !ns.legacy && !found {
 		if err := ns.ips.AddEntryIfNotExist(ns.defaultAllowIPSet, obj.Status.PodIP, podComment(obj)); err != nil {
 			return err
 		}
@@ -178,6 +181,7 @@ func (ns *ns) updatePod(oldObj, newObj *coreapi.Pod) error {
 		}
 
 		if !ns.legacy {
+			common.Log.Infof(">>>>>>>>>> DelEntry(a): %s", oldObj.Status.PodIP)
 			if err := ns.ips.DelEntryIfExists(ns.defaultAllowIPSet, oldObj.Status.PodIP); err != nil {
 				return err
 			}
@@ -195,11 +199,13 @@ func (ns *ns) updatePod(oldObj, newObj *coreapi.Pod) error {
 			return err
 		}
 
-		if !ns.legacy && found {
+		if !ns.legacy && !found {
 			if err := ns.ips.AddEntryIfNotExist(ns.defaultAllowIPSet, newObj.Status.PodIP, podComment(newObj)); err != nil {
 				return err
 			}
 		}
+
+		return nil
 	}
 
 	if !equals(oldObj.ObjectMeta.Labels, newObj.ObjectMeta.Labels) ||
@@ -240,6 +246,7 @@ func (ns *ns) deletePod(obj *coreapi.Pod) error {
 	}
 
 	if !ns.legacy {
+		common.Log.Infof(">>>>>>>>>> DelEntry(b): %s", obj.Status.PodIP)
 		if err := ns.ips.DelEntryIfExists(ns.defaultAllowIPSet, obj.Status.PodIP); err != nil {
 			return err
 		}

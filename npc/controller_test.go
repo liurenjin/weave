@@ -52,6 +52,10 @@ func (i *mockIPSet) AddEntry(ipsetName ipset.Name, entry string, comment string)
 	return nil
 }
 
+func (i *mockIPSet) AddEntryIfNotExist(ipsetName ipset.Name, entry string, comment string) error {
+	return nil
+}
+
 func (i *mockIPSet) DelEntry(ipsetName ipset.Name, entry string) error {
 	log.Printf("deleting entry %s from %s", entry, ipsetName)
 	if _, ok := i.sets[string(ipsetName)]; !ok {
@@ -62,6 +66,10 @@ func (i *mockIPSet) DelEntry(ipsetName ipset.Name, entry string) error {
 	}
 	delete(i.sets[string(ipsetName)].subSets, entry)
 
+	return nil
+}
+
+func (i *mockIPSet) DelEntryIfExists(ipsetName ipset.Name, entry string) error {
 	return nil
 }
 
