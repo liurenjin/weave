@@ -6,6 +6,7 @@ import (
 	"github.com/pkg/errors"
 	coreapi "k8s.io/client-go/pkg/api/v1"
 	extnapi "k8s.io/client-go/pkg/apis/extensions/v1beta1"
+	networkingv1 "k8s.io/client-go/pkg/apis/networking/v1"
 
 	"github.com/weaveworks/weave/common"
 	"github.com/weaveworks/weave/npc/ipset"
@@ -21,9 +22,9 @@ type NetworkPolicyController interface {
 	UpdatePod(oldObj, newObj *coreapi.Pod) error
 	DeletePod(obj *coreapi.Pod) error
 
-	AddNetworkPolicy(obj *extnapi.NetworkPolicy) error
-	UpdateNetworkPolicy(oldObj, newObj *extnapi.NetworkPolicy) error
-	DeleteNetworkPolicy(obj *extnapi.NetworkPolicy) error
+	AddNetworkPolicy(obj interface{}) error
+	UpdateNetworkPolicy(oldObj, newObj interface{}) error
+	DeleteNetworkPolicy(obj interface{}) error
 }
 
 type controller struct {
@@ -36,11 +37,14 @@ type controller struct {
 
 	nss         map[string]*ns // ns name -> ns struct
 	nsSelectors *selectorSet   // selector string -> nsSelector
+
+	legacy bool // denotes whether to use legacy network policies (k8s pre-1.7)
 }
 
-func New(nodeName string, ipt iptables.Interface, ips ipset.Interface) NetworkPolicyController {
+func New(nodeName string, legacy bool, ipt iptables.Interface, ips ipset.Interface) NetworkPolicyController {
 	c := &controller{
 		nodeName: nodeName,
+		legacy:   legacy,
 		ipt:      ipt,
 		ips:      ips,
 		nss:      make(map[string]*ns)}
@@ -66,7 +70,7 @@ func (npc *controller) onNewNsSelector(selector *selector) error {
 func (npc *controller) withNS(name string, f func(ns *ns) error) error {
 	ns, found := npc.nss[name]
 	if !found {
-		newNs, err := newNS(name, npc.nodeName, npc.ipt, npc.ips, npc.nsSelectors)
+		newNs, err := newNS(name, npc.nodeName, npc.legacy, npc.ipt, npc.ips, npc.nsSelectors)
 		if err != nil {
 			return err
 		}
@@ -115,32 +119,47 @@ func (npc *controller) DeletePod(obj *coreapi.Pod) error {
 	})
 }
 
-func (npc *controller) AddNetworkPolicy(obj *extnapi.NetworkPolicy) error {
+func (npc *controller) AddNetworkPolicy(obj interface{}) error {
 	npc.Lock()
 	defer npc.Unlock()
 
+	nsName, err := nsName(obj)
+	if err != nil {
+		return err
+	}
+
 	common.Log.Infof("EVENT AddNetworkPolicy %s", js(obj))
-	return npc.withNS(obj.ObjectMeta.Namespace, func(ns *ns) error {
+	return npc.withNS(nsName, func(ns *ns) error {
 		return errors.Wrap(ns.addNetworkPolicy(obj), "add network policy")
 	})
 }
 
-func (npc *controller) UpdateNetworkPolicy(oldObj, newObj *extnapi.NetworkPolicy) error {
+func (npc *controller) UpdateNetworkPolicy(oldObj, newObj interface{}) error {
 	npc.Lock()
 	defer npc.Unlock()
 
+	nsName, err := nsName(oldObj)
+	if err != nil {
+		return err
+	}
+
 	common.Log.Infof("EVENT UpdateNetworkPolicy %s %s", js(oldObj), js(newObj))
-	return npc.withNS(oldObj.ObjectMeta.Namespace, func(ns *ns) error {
+	return npc.withNS(nsName, func(ns *ns) error {
 		return errors.Wrap(ns.updateNetworkPolicy(oldObj, newObj), "update network policy")
 	})
 }
 
-func (npc *controller) DeleteNetworkPolicy(obj *extnapi.NetworkPolicy) error {
+func (npc *controller) DeleteNetworkPolicy(obj interface{}) error {
 	npc.Lock()
 	defer npc.Unlock()
 
+	nsName, err := nsName(obj)
+	if err != nil {
+		return err
+	}
+
 	common.Log.Infof("EVENT DeleteNetworkPolicy %s", js(obj))
-	return npc.withNS(obj.ObjectMeta.Namespace, func(ns *ns) error {
+	return npc.withNS(nsName, func(ns *ns) error {
 		return errors.Wrap(ns.deleteNetworkPolicy(obj), "delete network policy")
 	})
 }
@@ -173,4 +192,15 @@ func (npc *controller) DeleteNamespace(obj *coreapi.Namespace) error {
 	return npc.withNS(obj.ObjectMeta.Name, func(ns *ns) error {
 		return errors.Wrap(ns.deleteNamespace(obj), "delete namespace")
 	})
+}
+
+func nsName(obj interface{}) (string, error) {
+	switch obj := obj.(type) {
+	case *networkingv1.NetworkPolicy:
+		return obj.ObjectMeta.Namespace, nil
+	case *extnapi.NetworkPolicy:
+		return obj.ObjectMeta.Namespace, nil
+	}
+
+	return "", errInvalidNetworkPolicyObjType
 }
