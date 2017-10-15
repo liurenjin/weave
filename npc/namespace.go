@@ -322,22 +322,36 @@ func bypassRule(nsIpsetName ipset.Name, namespace string) []string {
 	return []string{"-m", "set", "--match-set", string(nsIpsetName), "dst", "-j", "ACCEPT", "-m", "comment", "--comment", "DefaultAllow isolation for namespace: " + namespace}
 }
 
-func (ns *ns) ensureBypassRule(nsIpsetName ipset.Name) error {
-	common.Log.Debugf("ensuring rule for DefaultAllow in namespace: %s, set %s", ns.name, nsIpsetName)
-	return ns.ipt.Append(TableFilter, DefaultChain, bypassRule(ns.allPods.ipsetName, ns.name)...)
+func (ns *ns) ensureBypassRule() error {
+	var ipset ipset.Name
+	if ns.legacy {
+		ipset = ns.allPods.ipsetName
+	} else {
+		ipset = ns.defaultAllowIPSet
+	}
+
+	common.Log.Debugf("ensuring rule for DefaultAllow in namespace: %s, set %s", ns.name, ipset)
+	return ns.ipt.Append(TableFilter, DefaultChain, bypassRule(ipset, ns.name)...)
 }
 
-func (ns *ns) deleteBypassRule(nsIpsetName ipset.Name) error {
-	common.Log.Debugf("removing default rule in namespace: %s, set %s", ns.name, nsIpsetName)
-	return ns.ipt.Delete(TableFilter, DefaultChain, bypassRule(ns.allPods.ipsetName, ns.name)...)
+func (ns *ns) deleteBypassRule() error {
+	var ipset ipset.Name
+	if ns.legacy {
+		ipset = ns.allPods.ipsetName
+	} else {
+		ipset = ns.defaultAllowIPSet
+	}
+
+	common.Log.Debugf("removing default rule in namespace: %s, set %s", ns.name, ipset)
+	return ns.ipt.Delete(TableFilter, DefaultChain, bypassRule(ipset, ns.name)...)
 }
 
 func (ns *ns) addNamespace(obj *coreapi.Namespace) error {
 	ns.namespace = obj
 
 	// Insert a rule to bypass policies if namespace is DefaultAllow
-	if !isDefaultDeny(obj) {
-		if err := ns.ensureBypassRule(ns.allPods.ipsetName); err != nil {
+	if !ns.isDefaultDeny(obj) {
+		if err := ns.ensureBypassRule(); err != nil {
 			return err
 		}
 	}
@@ -351,18 +365,18 @@ func (ns *ns) updateNamespace(oldObj, newObj *coreapi.Namespace) error {
 	ns.namespace = newObj
 
 	// Update bypass rule if ingress default has changed
-	oldDefaultDeny := isDefaultDeny(oldObj)
-	newDefaultDeny := isDefaultDeny(newObj)
+	oldDefaultDeny := ns.isDefaultDeny(oldObj)
+	newDefaultDeny := ns.isDefaultDeny(newObj)
 
 	if oldDefaultDeny != newDefaultDeny {
 		common.Log.Infof("namespace DefaultDeny changed from %t to %t", oldDefaultDeny, newDefaultDeny)
 		if oldDefaultDeny {
-			if err := ns.ensureBypassRule(ns.allPods.ipsetName); err != nil {
+			if err := ns.ensureBypassRule(); err != nil {
 				return err
 			}
 		}
 		if newDefaultDeny {
-			if err := ns.deleteBypassRule(ns.allPods.ipsetName); err != nil {
+			if err := ns.deleteBypassRule(); err != nil {
 				return err
 			}
 		}
@@ -396,14 +410,37 @@ func (ns *ns) deleteNamespace(obj *coreapi.Namespace) error {
 	ns.namespace = nil
 
 	// Remove bypass rule
-	if !isDefaultDeny(obj) {
-		if err := ns.deleteBypassRule(ns.allPods.ipsetName); err != nil {
+	if !ns.isDefaultDeny(obj) {
+		if err := ns.deleteBypassRule(); err != nil {
 			return err
 		}
 	}
 
 	// Remove namespace ipset from any matching namespace selectors
 	return ns.nsSelectors.delFromMatching(obj.ObjectMeta.Labels, string(ns.allPods.ipsetName))
+}
+
+func (ns *ns) isDefaultDeny(namespace *coreapi.Namespace) bool {
+	nnpJSON, found := namespace.ObjectMeta.Annotations["net.beta.kubernetes.io/network-policy"]
+	if !found {
+		return false
+	}
+
+	if !ns.legacy {
+		common.Log.Warn("DefaultDeny annotation is supported only in legacy mode (--use-legacy-netpol)")
+		return false
+	}
+
+	var nnp NamespaceNetworkPolicy
+	if err := json.Unmarshal([]byte(nnpJSON), &nnp); err != nil {
+		common.Log.Warn("Ignoring network policy annotation: unmarshal failed:", err)
+		// If we can't understand the annotation, behave as if it isn't present
+		return false
+	}
+
+	return nnp.Ingress != nil &&
+		nnp.Ingress.Isolation != nil &&
+		*(nnp.Ingress.Isolation) == DefaultDeny
 }
 
 func hasIP(pod *coreapi.Pod) bool {
@@ -422,24 +459,6 @@ func equals(a, b map[string]string) bool {
 		}
 	}
 	return true
-}
-
-func isDefaultDeny(namespace *coreapi.Namespace) bool {
-	nnpJSON, found := namespace.ObjectMeta.Annotations["net.beta.kubernetes.io/network-policy"]
-	if !found {
-		return false
-	}
-
-	var nnp NamespaceNetworkPolicy
-	if err := json.Unmarshal([]byte(nnpJSON), &nnp); err != nil {
-		common.Log.Warn("Ignoring network policy annotation: unmarshal failed:", err)
-		// If we can't understand the annotation, behave as if it isn't present
-		return false
-	}
-
-	return nnp.Ingress != nil &&
-		nnp.Ingress.Isolation != nil &&
-		*(nnp.Ingress.Isolation) == DefaultDeny
 }
 
 func namespaceComment(namespace *ns) string {
