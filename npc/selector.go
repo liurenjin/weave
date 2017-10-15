@@ -12,13 +12,14 @@ import (
 type selectorSpec struct {
 	key      string          // string representation (for hash keying/equality comparison)
 	selector labels.Selector // k8s Selector object (for matching)
+	dst      bool            // destination selector
 
 	ipsetType ipset.Type // type of ipset to provision
 	ipsetName ipset.Name // generated ipset name
 	nsName    string     // Namespace name
 }
 
-func newSelectorSpec(json *metav1.LabelSelector, nsName string, ipsetType ipset.Type) (*selectorSpec, error) {
+func newSelectorSpec(json *metav1.LabelSelector, dst bool, nsName string, ipsetType ipset.Type) (*selectorSpec, error) {
 	selector, err := metav1.LabelSelectorAsSelector(json)
 	if err != nil {
 		return nil, err
@@ -27,6 +28,7 @@ func newSelectorSpec(json *metav1.LabelSelector, nsName string, ipsetType ipset.
 	return &selectorSpec{
 		key:      key,
 		selector: selector,
+		dst:      dst,
 		// We prefix the selector string with the namespace name when generating
 		// the shortname because you can specify the same selector in multiple
 		// namespaces - we need those to map to distinct ipsets
@@ -69,15 +71,20 @@ func newSelectorSet(ips ipset.Interface, onNewSelector selectorFn) *selectorSet 
 		entries:       make(map[string]*selector)}
 }
 
-func (ss *selectorSet) addToMatching(labelMap map[string]string, entry string, comment string) error {
+// TODO(mp) document `found`
+func (ss *selectorSet) addToMatching(labelMap map[string]string, entry string, comment string) (bool, error) {
+	found := false
 	for _, s := range ss.entries {
 		if s.matches(labelMap) {
+			if s.spec.dst {
+				found = true
+			}
 			if err := s.addEntry(entry, comment); err != nil {
-				return err
+				return found, err
 			}
 		}
 	}
-	return nil
+	return found, nil
 }
 
 func (ss *selectorSet) delFromMatching(labelMap map[string]string, entry string) error {
